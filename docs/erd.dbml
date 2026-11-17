@@ -1,0 +1,92 @@
+// Car Rental AI - schema reference, reconciled 2026-10-26.
+// Source: Domain entities, ApplicationDbContext and EF ModelSnapshot.
+// EF migrations are authoritative for database creation; no hand-written DDL.
+// No SQL defaults/global soft-delete filter are configured in the current model.
+
+Table Customers {
+  Id int [pk, increment]
+  FullName nvarchar(max) [not null]
+  PhoneNumber nvarchar(450) [not null, unique]
+  Email nvarchar(450) [not null, unique]
+  PasswordHash nvarchar(max) [not null]
+  Role int [not null, note: '1=Customer, 2=Staff, 3=Admin']
+  IdentityNumber nvarchar(max) [null]
+  Address nvarchar(max) [null]
+  CreatedAt datetime2 [not null]
+  UpdatedAt datetime2 [null]
+  IsDeleted bit [not null]
+}
+
+Table Cars {
+  Id int [pk, increment]
+  CarType int [not null, note: '1=Sedan, 2=SUV, 3=Hatchback, 4=MPV, 5=Pickup, 6=Luxury']
+  Brand nvarchar(max) [not null]
+  Model nvarchar(max) [not null]
+  LicensePlate nvarchar(450) [not null, unique]
+  Seats int [not null]
+  CarAgeYears int [not null]
+  BasePricePerDay decimal(18,2) [not null]
+  Status int [not null, note: '1=SanSang, 2=DangThue, 3=BaoTri, 4=NgungHoatDong']
+  OverridePrice decimal(18,2) [null]
+  Description nvarchar(max) [null]
+  CreatedAt datetime2 [not null]
+  UpdatedAt datetime2 [null]
+  IsDeleted bit [not null]
+}
+
+Table CarImages {
+  Id int [pk, increment]
+  CarId int [not null, ref: > Cars.Id]
+  ImageUrl nvarchar(max) [not null, note: 'MinIO object key; API DTO exposes FilePath']
+  IsPrimary bit [not null]
+  SortOrder int [not null]
+  CreatedAt datetime2 [not null]
+  UpdatedAt datetime2 [null]
+  IsDeleted bit [not null]
+}
+
+Table Bookings {
+  Id int [pk, increment]
+  CustomerId int [not null, ref: > Customers.Id]
+  CarId int [not null, ref: > Cars.Id]
+  StartDate datetime2 [not null]
+  EndDate datetime2 [not null]
+  PredictedPricePerDay decimal(18,2) [null]
+  FinalPricePerDay decimal(18,2) [not null]
+  TotalPrice decimal(18,2) [not null]
+  IsFallback bit [not null]
+  Status int [not null, note: '1=ChoXacNhan, 2=DaXacNhan, 3=DangThue, 4=DaTraXe, 5=DaHuy']
+  CorrelationId nvarchar(max) [null]
+  Note nvarchar(max) [null]
+  CreatedAt datetime2 [not null]
+  UpdatedAt datetime2 [null]
+  IsDeleted bit [not null]
+}
+
+Table Payments {
+  Id int [pk, increment]
+  BookingId int [not null, ref: > Bookings.Id]
+  Amount decimal(18,2) [not null]
+  Method int [not null, note: '1=TienMat, 2=ChuyenKhoan, 3=TheNoiDia, 4=ViDienTu']
+  Status int [not null, note: '1=ChuaThanhToan, 2=DaCoc, 3=DaThanhToan, 4=DaHoanTien']
+  TransactionCode nvarchar(max) [null]
+  PaidAt datetime2 [null]
+  CreatedAt datetime2 [not null]
+  UpdatedAt datetime2 [null]
+  IsDeleted bit [not null]
+}
+
+Table ReturnRecords {
+  Id int [pk, increment]
+  BookingId int [not null, unique, ref: - Bookings.Id]
+  ReturnedAt datetime2 [not null]
+  LateDays int [not null]
+  LateFee decimal(18,2) [not null]
+  DamageFee decimal(18,2) [not null]
+  DamageNote nvarchar(max) [null]
+  FinalAmount decimal(18,2) [not null]
+  StaffId int [null, note: 'Scalar property only; EF model currently has no FK to Customers']
+  CreatedAt datetime2 [not null]
+  UpdatedAt datetime2 [null]
+  IsDeleted bit [not null]
+}
