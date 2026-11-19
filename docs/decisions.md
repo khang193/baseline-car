@@ -137,6 +137,25 @@ React thống nhất TypeScript với team, Vite khởi động nhanh, SPA tách
 
 ---
 
+## ADR-007: Phân quyền 3 vai trò, nhật ký thay đổi, danh sách đen (Wave 1)
+
+- **Ba vai trò, không thêm kế toán:** giữ `UserRole` Customer/Staff/Admin; chỉ siết quyền bằng `[Authorize(Roles)]` và kiểm tra trong service.
+- **Tạo xe theo phương án C:** Staff được tạo xe nhưng xe vào `CarStatus.ChoDuyet` (5), ẩn khỏi danh sách công khai và không đặt được; Staff không sửa giá, không xóa xe. Admin duyệt qua `POST /api/cars/{id}/approve` (có thể đặt giá), xe sang `SanSang`. Admin tạo xe thì vào thẳng `SanSang`.
+- **`IncludePending` nằm trong `CarFilterRequest`** thay vì tham số mới của `ICarRepository`, để không phá các fake repository hiện có trong test.
+- **Decorator Guard cho Booking/Rental** (`BookingServiceGuard`, `RentalServiceGuard`) đăng ký qua `ActivatorUtilities`: luật chặn khách trong danh sách đen đặt ở Guard, không sửa `BookingService`/`RentalService`.
+- **Kiểm tra JWT mỗi request:** `OnTokenValidated` đọc DB, từ chối nếu tài khoản bị khóa/xóa hoặc vai trò khác claim. Đổi lại mỗi request có thêm một truy vấn theo khóa chính.
+- **Audit bằng `SaveChangesInterceptor`:** whitelist 6 entity, che `PasswordHash`, bỏ `UpdatedAt`, cắt JSON 8000 ký tự; entity mới được ghi `EntityId` ở lần lưu thứ hai sau khi có Id. Hiện chưa ghi riêng thao tác đăng nhập.
+- **Danh sách đen** có hai mức (`CanhBao`, `Chan`); gỡ bằng đánh dấu `RemovedAt` để giữ lịch sử.
+- **Hoãn sang wave 2:** đóng public-read của MinIO (đã làm ở ADR-008).
+
+## ADR-008: Khách hàng, giấy tờ riêng tư, điểm thưởng (Wave 2)
+
+- **Lưu trữ riêng tư:** ảnh CCCD/bằng lái ở prefix `private/documents/{customerId}` và chỉ đọc qua `GET /api/documents/{id}/file` (kiểm chủ hồ sơ hoặc Staff/Admin, `no-store`). Policy MinIO đổi từ cả bucket sang chỉ `cars/` và `avatars/` (compose `mc anonymous set none` rồi `set download` từng prefix). Avatar công khai vì không nhạy cảm.
+- **Xác minh:** Staff/Admin duyệt, không tự duyệt hồ sơ của mình. Nộp lại thay hồ sơ cũ (xóa mềm), giữ file cũ để truy vết. Duyệt CCCD đồng bộ `Customer.IdentityNumber`; sửa số CCCD trong hồ sơ cá nhân đưa CCCD đã duyệt về `ChoDuyet`.
+- **Chặn nhận xe:** `RentalServiceGuard` kiểm `IDocumentVerification` (interface nhỏ riêng, không nhồi vào `ICustomerScreening`) và gọi `ILoyaltyService` khi trả xe; hai interface này được thêm vào danh sách cho phép của test kiến trúc Bookings -> Customers.
+- **Điểm thưởng:** 1% giá trị đơn trả xe, cộng idempotent theo `(BookingId, Reason)` ở lần lưu thứ hai (không cùng giao dịch với trả xe). Hạng theo điểm tích lũy 0/100k/300k/800k. Staff xem chi tiết khách bản rút gọn.
+- **Danh sách khách:** SĐT trong cột danh sách đen so khớp nguyên văn; trang chi tiết dùng sàng lọc đầy đủ.
+
 # PHẦN B — PHẠM VI SẢN PHẨM DỰ KIẾN (THIẾT KẾ BAN ĐẦU)
 
 Phần này là thiết kế ban đầu để tham khảo lịch sử, không dùng làm contract hoặc trạng thái đã triển khai. Các tên trạng thái/luồng dự kiến có thể khác code hiện tại; ưu tiên phần đính chính ở đầu tài liệu và `api-contract.md` khi phát triển.
@@ -221,3 +240,40 @@ Khách đăng nhập
 ```
 
 Xe quay về `Available`, lịch được giải phóng cho booking kế tiếp.
+- **Quyết định cố ý (từ review wave 2):** đổi mật khẩu không thu hồi token cũ (JWT hết hạn tự nhiên, chưa có danh sách thu hồi); dữ liệu DemoSeed dùng key ảnh giả cho giấy tờ nên trang duyệt hiện "Không tải được ảnh" với dữ liệu mẫu.
+
+## ADR-009: Bàn giao, tiền cọc, gia hạn (Wave 3)
+
+- **Cọc không phải doanh thu.** Lưu ở bảng riêng `DepositTransactions` (Thu/KhauTru/Hoan), không đi qua `Payments` nên không vào báo cáo doanh thu. Chỉ khoản khấu trừ tạo `Payment` phương thức `TruCoc = 6` (không dùng 5, xem `can-thong-nhat-voi-nang.md`). `POST .../payments` từ chối `TruCoc`.
+- **Chặn bằng Guard, không sửa service gốc.** `RentalServiceGuard` chặn nhận xe khi thiếu biên bản Giao hoặc chưa thu cọc, chặn trả xe khi thiếu biên bản Nhan. Biên bản và cọc tải riêng; ảnh bàn giao ở prefix `private/handovers/`, chỉ đọc qua API có kiểm quyền (như giấy tờ).
+- **Tránh vòng DI.** `DepositService` nhận `RentalService` gốc (không phải Guard) để tính còn nợ; Guard phụ thuộc `IDepositService`.
+- **Quyết toán cọc** trong một transaction có khóa dòng booking (`UPDLOCK`), unique `(BookingId, Type)` chặn ghi đôi. Đơn `DaHuy` sau khi đã thu cọc hoàn toàn bộ (bổ sung ngoài kế hoạch gốc để không giữ tiền khách).
+- **Gia hạn:** khách gửi yêu cầu, Staff/Admin duyệt; unique index lọc cho một yêu cầu chờ duyệt mỗi đơn; lúc duyệt khóa xe và kiểm lại trùng lịch. Giá giữ theo giá đã chốt của đơn, không gọi lại AI.
+- **Cố ý chấp nhận:** nút "Đặt lại" chỉ điền sẵn ngày ở trang đặt xe, giá vẫn tính lại như đặt mới.
+
+## ADR-010: Mã giảm giá, phụ phí, thuê theo giờ, giao tận nơi, chi nhánh (Wave 4)
+
+- **`TotalPrice` là tổng cuối** (đã gồm phụ phí, tài xế, giao nhận, giảm giá). Chi tiết nằm ở bảng `BookingCharges` (giảm giá là dòng âm) nên hiển thị và đối soát được. Mọi logic dùng `TotalPrice` (thanh toán, cọc, báo cáo, gia hạn, hoàn tiền khi hủy của Năng) tự dùng tổng này.
+- **Khung tính phí `IBookingChargeCalculator`** là tham số ctor tùy chọn của `BookingService` (mặc định `NoCharges`) nên test và cách dựng cũ không đổi; `BookingService` thành `partial` với `BookingService.Pricing.cs` để giảm xung đột khi merge với nhánh của Năng.
+- **Chống dùng mã vượt lượt khi đồng thời:** `UPDATE Coupons SET UsedCount = UsedCount + 1 WHERE ... UsedCount < UsageLimit` chạy trong transaction tạo đơn (đã khóa xe), kiểm tra `rows == 1`. Dòng mã bị khóa tới hết transaction nên hai đơn cùng khách xếp hàng và lần đếm lại lượt mỗi khách thấy đơn trước. Mã duy nhất bằng unique index. Hủy đơn trả lại lượt trong cùng transaction với lưu trạng thái hủy. Chỉ Admin tạo/sửa mã.
+- **Phí giao nhận và tài xế là cấu hình cố định** (section `Pricing`), không dùng bản đồ/khoảng cách. Không lưu tên tài xế; chỉ có cờ `WithDriver` và phí.
+- **Thuê theo giờ** dùng cùng cột `StartDate/EndDate` (có giờ) nên kiểm tra trùng lịch giữ nguyên. Không qua AI để tính giá giờ (AI chỉ dự đoán giá ngày); không gia hạn.
+- **Chi nhánh:** `Car.BranchId` (null được cho dữ liệu cũ), `Booking.PickupBranchId/ReturnBranchId`. Vẫn ba vai trò Customer/Staff/Admin; không gắn Staff vào chi nhánh (kế hoạch không yêu cầu quyền theo chi nhánh).
+- **Cố ý chấp nhận:** `BranchId` khi lưu xe không được kiểm tra ở tầng service (sai id sẽ lỗi khóa ngoại); giới hạn mỗi khách chỉ kiểm khi đặt thật, không kiểm khi báo giá; tạo mã trùng đồng thời cùng lúc có thể trả 500 thay vì 409.
+
+### ADR-010 bổ sung (sau review đợt 4)
+- Thuê theo giờ yêu cầu xe có `PricePerHour` (400 `HOURLY_NOT_SUPPORTED`), bắt đầu sau ít nhất 2 giờ (400 `HOURLY_START`), không gọi AI; không còn mặc định giá ngày / 8.
+- Thuê theo ngày phải từ 1 ngày trở lên (400 `BOOKING_TOO_SHORT`).
+- Chấp nhận giới hạn: gia hạn chỉ tính tiền thuê theo giá ngày, KHÔNG cộng thêm phí tài xế hoặc phụ phí theo ngày cho các ngày gia hạn; cần thu riêng nếu muốn.
+- Trả xe gửi `returnedAt` là thời điểm UTC (ISO) từ ô datetime-local; hiển thị vẫn theo giờ cục bộ.
+- Đơn theo giờ lưu UTC: frontend gửi `toISOString()`, API trả chuỗi không offset và frontend parse như UTC (thêm 'Z') rồi hiển thị giờ cục bộ. Đơn theo ngày vẫn là ngày thuần.
+
+
+## ADR-011: Xe và báo cáo (Wave 5)
+
+- **Dashboard "thời gian thực" = polling 30 giây**, dừng khi tab ẩn (`visibilitychange`), không dùng SignalR. `GET /api/dashboard/summary` trả `no-store`. `TodayRevenue` chỉ cho Admin.
+- **Quá hạn/sắp trả:** đơn theo giờ so `EndDate` (UTC) với bây giờ; đơn theo ngày là ngày thuần nên hạn thực tế là hết ngày `EndDate` (00:00 ngày kế tiếp, tính theo UTC). Sắp trả = trong 24 giờ tới.
+- **Nhắc hạn bảo trì tính lúc đọc**, không có job nền; km lấy từ biên bản bàn giao. Bắt đầu bảo trì khóa dòng xe trong transaction; xe đang thuê thì 409, có đơn chồng thì cần `Force`.
+- **Xuất file:** ClosedXML (MIT) cho xlsx, PDFsharp có sẵn cho PDF (`PdfFonts` riêng, resolver dùng `??=` nên trùng với hợp đồng). Ô văn bản bắt đầu bằng `= + - @`, tab, CR được thêm dấu nháy đơn để chống injection. Doanh thu không tính khoản Thu cọc.
+- **Nhập xe từ Excel:** tất cả hoặc không; validate từng dòng bằng chính các attribute của `CreateCarRequest`, báo lỗi theo dòng; giới hạn 2 MB/500 dòng; công thức không được đánh giá. Quyền như tạo xe thủ công (Staff -> ChoDuyet, không nhập giá cọc/giờ). Chấp nhận: kiểm tra trùng biển số theo từng dòng (một truy vấn mỗi dòng), tối đa 500 nên chấp nhận được.
+- **Chấp nhận:** nhập hai người cùng lúc cùng biển số có thể lỗi unique index (500) thay vì lỗi theo dòng; lịch xe đơn theo ngày hiển thị theo giờ cục bộ trình duyệt.

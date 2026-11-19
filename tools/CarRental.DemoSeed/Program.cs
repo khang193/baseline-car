@@ -3,7 +3,10 @@
 //   hoặc đặt biến môi trường ConnectionStrings__Default.
 using CarRental.Domain.Common;
 using CarRental.Domain.Modules.Bookings;
+using CarRental.Domain.Modules.Branches;
+using CarRental.Domain.Modules.Pricing;
 using CarRental.Domain.Modules.Cars;
+using CarRental.Application.Modules.Customers;
 using CarRental.Domain.Modules.Customers;
 using CarRental.Infrastructure.Persistence;
 using CarRental.Infrastructure.Security;
@@ -42,7 +45,7 @@ Customer EnsureUser(string name, string email, string phone, UserRole role, stri
     return u;
 }
 
-EnsureUser("Quản trị viên Demo", "admin@demo.local", "0900000001", UserRole.Admin, null, null);
+EnsureUser("Quản trị viên Demo", "admin@demo.local", "0900000099", UserRole.Admin, null, null);
 var staff = EnsureUser("Nhân viên Demo", "staff@demo.local", "0900000011", UserRole.Staff, null, null);
 var kh1 = EnsureUser("Nguyễn Văn An", "an.nguyen@demo.local", "0912000001", UserRole.Customer, "079200000001", "12 Lê Lợi, Quận 1, TP.HCM");
 var kh2 = EnsureUser("Trần Thị Bình", "binh.tran@demo.local", "0912000002", UserRole.Customer, "001200000002", "25 Hai Bà Trưng, Hoàn Kiếm, Hà Nội");
@@ -311,6 +314,12 @@ foreach (var c in db.Cars.Where(x => x.Transmission == null).ToList())
 db.SaveChanges();
 Console.WriteLine($"Đã điền thông số chi tiết cho {specsFilled} xe.");
 
+SeedWave1();
+SeedWave2();
+SeedWave3();
+SeedWave4();
+SeedWave5();
+
 Console.WriteLine($"Xong. Thêm mới: {addedUsers} tài khoản, {addedCars} xe, {addedBookings} booking.");
 Console.WriteLine($"Tổng hiện có: {db.Customers.Count()} tài khoản, {db.Cars.Count()} xe, {db.Bookings.Count()} booking.");
 Console.WriteLine();
@@ -320,4 +329,233 @@ Console.WriteLine("  Staff   : staff@demo.local");
 Console.WriteLine("  Khách 1 : an.nguyen@demo.local");
 Console.WriteLine("  Khách 2 : binh.tran@demo.local");
 Console.WriteLine("  Khách 3 : cuong.le@demo.local");
+Console.WriteLine("  Staff 2 : staff2@demo.local");
+Console.WriteLine("  Khách bị cảnh báo: warn@demo.local | Khách bị chặn: blocked@demo.local");
 return 0;
+
+// ---------- Đợt 1: phân quyền, danh sách chặn, xe chờ duyệt (idempotent) ----------
+void SeedWave1()
+{
+    var admin = db.Customers.First(c => c.Email == "admin@demo.local");
+    EnsureUser("Nhân viên Demo 2", "staff2@demo.local", "0900000012", UserRole.Staff, null, null);
+    var warn = EnsureUser("Khách Cảnh Báo", "warn@demo.local", "0912000091", UserRole.Customer, "079200000091", "1 Nguyễn Huệ, Quận 1, TP.HCM");
+    var blocked = EnsureUser("Khách Bị Chặn", "blocked@demo.local", "0912000092", UserRole.Customer, "079200000092", "2 Nguyễn Huệ, Quận 1, TP.HCM");
+
+    void EnsureBlacklist(Customer c, BlacklistLevel level, string reason)
+    {
+        if (db.Set<BlacklistEntry>().Any(e => e.CustomerId == c.Id && e.RemovedAt == null)) return;
+        db.Set<BlacklistEntry>().Add(new BlacklistEntry
+        {
+            CustomerId = c.Id, IdentityNumber = c.IdentityNumber, PhoneNumber = c.PhoneNumber,
+            Level = level, Reason = reason, CreatedById = admin.Id
+        });
+        db.SaveChanges();
+    }
+    EnsureBlacklist(warn, BlacklistLevel.CanhBao, "Trả xe trễ nhiều lần (demo).");
+    EnsureBlacklist(blocked, BlacklistLevel.Chan, "Làm hư hỏng xe và không bồi thường (demo).");
+
+    // Xe do Staff đề xuất, đang chờ Admin duyệt
+    EnsureCar(CarType.SUV, "Toyota", "Corolla Cross", "51A-100.13", 5, 1, 850_000, CarStatus.ChoDuyet, "Xe do nhân viên đề xuất, chờ quản trị viên duyệt giá.");
+}
+
+// ---------- Đợt 2: giấy tờ xác minh và điểm thưởng (idempotent) ----------
+// Ảnh giấy tờ chỉ là key giả: chưa có file trong MinIO nên xem ảnh sẽ 404; nộp lại qua giao diện để có ảnh thật.
+void SeedWave2()
+{
+    var admin = db.Customers.First(c => c.Email == "admin@demo.local");
+    void EnsureDoc(Customer c, DocumentType type, string number, DocumentStatus status, string? reject = null)
+    {
+        if (db.Set<CustomerDocument>().Any(d => d.CustomerId == c.Id && d.Type == type && !d.IsDeleted)) return;
+        var doc = new CustomerDocument
+        {
+            CustomerId = c.Id, Type = type, Number = number, Status = status, RejectReason = reject,
+            FrontKey = $"private/documents/{c.Id}/demo-{(int)type}-front.webp",
+            BackKey = $"private/documents/{c.Id}/demo-{(int)type}-back.webp",
+            ExpiryDate = type == DocumentType.BangLai ? DateTime.Today.AddYears(5) : null,
+            LicenseClass = type == DocumentType.BangLai ? "B2" : null
+        };
+        if (status != DocumentStatus.ChoDuyet) { doc.ReviewedById = admin.Id; doc.ReviewedAt = DateTime.UtcNow; }
+        db.Set<CustomerDocument>().Add(doc);
+        db.SaveChanges();
+    }
+    EnsureDoc(kh1, DocumentType.Cccd, "079200000001", DocumentStatus.DaDuyet);
+    EnsureDoc(kh1, DocumentType.BangLai, "079200000001", DocumentStatus.DaDuyet);
+    EnsureDoc(kh2, DocumentType.Cccd, "001200000002", DocumentStatus.ChoDuyet);
+    EnsureDoc(kh3, DocumentType.Cccd, "048200000003", DocumentStatus.TuChoi, "Ảnh mờ, không đọc được số CCCD (demo).");
+
+    // Điểm = 1% giá trị các đơn đã trả xe, cùng công thức với RentalServiceGuard
+    var done = db.Bookings.Where(b => !b.IsDeleted && b.Status == BookingStatus.DaTraXe)
+        .Select(b => new { b.Id, b.CustomerId, Amount = b.ReturnRecord != null ? b.ReturnRecord.FinalAmount : b.TotalPrice }).ToList();
+    var awarded = db.Set<LoyaltyTransaction>().Where(t => t.BookingId != null && t.Reason == LoyaltyReason.TichDiem)
+        .Select(t => t.BookingId!.Value).ToHashSet();
+    foreach (var d in done.Where(x => !awarded.Contains(x.Id)))
+    {
+        var pts = LoyaltyPolicy.PointsFor(d.Amount);
+        if (pts <= 0) continue;
+        db.Set<LoyaltyTransaction>().Add(new LoyaltyTransaction { CustomerId = d.CustomerId, BookingId = d.Id, Points = pts, Reason = LoyaltyReason.TichDiem });
+        var cu = db.Customers.Find(d.CustomerId)!;
+        cu.LoyaltyPoints += pts; cu.LifetimePoints += pts;
+    }
+    db.SaveChanges();
+    Console.WriteLine("Đã seed giấy tờ (An đã xác minh, Bình chờ duyệt, Cường bị từ chối) và điểm thưởng.");
+}
+
+// ---------- Đợt 3: cọc bảo đảm, biên bản bàn giao, gia hạn (idempotent) ----------
+void SeedWave3()
+{
+    // Cọc: 15 triệu cho xe hạng sang, 5 triệu cho xe còn lại (chỉ điền xe chưa có cọc).
+    foreach (var c in db.Cars.Where(x => x.SecurityDeposit == 0).ToList())
+        c.SecurityDeposit = c.CarType == CarType.Luxury ? 15_000_000m : 5_000_000m;
+    db.SaveChanges();
+
+    var cars = db.Cars.ToDictionary(c => c.Id);
+    void EnsureHandover(Booking b, HandoverType type, int odo, int fuel, string? note)
+    {
+        if (db.Set<HandoverRecord>().Any(h => h.BookingId == b.Id && h.Type == type)) return;
+        db.Set<HandoverRecord>().Add(new HandoverRecord { BookingId = b.Id, Type = type, Odometer = odo, FuelLevel = fuel, ConditionNote = note, StaffId = staff.Id });
+        db.SaveChanges();
+    }
+    void EnsureDepositCollected(Booking b)
+    {
+        if (db.Set<DepositTransaction>().Any(t => t.BookingId == b.Id && t.Type == DepositTxType.Thu)) return;
+        db.Set<DepositTransaction>().Add(new DepositTransaction
+        {
+            BookingId = b.Id, Type = DepositTxType.Thu, Amount = cars[b.CarId].SecurityDeposit, Method = PaymentMethod.TienMat, StaffId = staff.Id
+        });
+        db.SaveChanges();
+    }
+    // Quyết toán như DepositService: trừ phần còn phải trả (tối đa bằng cọc) bằng Payment TruCoc, hoàn phần còn lại.
+    void EnsureDepositSettled(Booking b)
+    {
+        EnsureDepositCollected(b);
+        if (db.Set<DepositTransaction>().Any(t => t.BookingId == b.Id && t.Type != DepositTxType.Thu)) return;
+        var held = cars[b.CarId].SecurityDeposit;
+        var amountToPay = db.ReturnRecords.Where(r => r.BookingId == b.Id).Select(r => (decimal?)r.FinalAmount).FirstOrDefault() ?? b.TotalPrice;
+        var paid = db.Payments.Where(p => p.BookingId == b.Id && (p.Status == PaymentStatus.DaCoc || p.Status == PaymentStatus.DaThanhToan)).Sum(p => p.Amount);
+        var deduct = Math.Min(held, Math.Max(0, amountToPay - paid));
+        if (deduct > 0)
+        {
+            db.Payments.Add(new Payment { BookingId = b.Id, Amount = deduct, Method = PaymentMethod.TruCoc, Status = PaymentStatus.DaThanhToan, PaidAt = DateTime.UtcNow, TransactionCode = "TRU-COC" });
+            db.Set<DepositTransaction>().Add(new DepositTransaction { BookingId = b.Id, Type = DepositTxType.KhauTru, Amount = deduct, Method = PaymentMethod.TruCoc, StaffId = staff.Id, Note = "Trừ phí hư hại/phát sinh (demo)." });
+        }
+        if (held - deduct > 0)
+            db.Set<DepositTransaction>().Add(new DepositTransaction { BookingId = b.Id, Type = DepositTxType.Hoan, Amount = held - deduct, Method = PaymentMethod.TienMat, StaffId = staff.Id, Note = "Hoàn cọc còn lại (demo)." });
+        db.SaveChanges();
+    }
+
+    // Hai đơn đã trả xe có phí hư hại: 1,2 triệu (nhỏ hơn cọc 5 triệu) và 7 triệu (lớn hơn cọc).
+    var b9 = EnsureBooking("demo-seed-09", kh1, ranger, -40, -37, BookingStatus.DaTraXe, "Đi Tây Nguyên.");
+    if (b9 != null)
+    {
+        AddReturn(b9, b9.EndDate, 1_200_000m, "Móp cản trước, trầy gương chiếu hậu.");
+        AddPayment(b9, b9.TotalPrice, PaymentMethod.ChuyenKhoan, PaymentStatus.DaThanhToan, "DEMO-PAY-009", 40);
+    }
+    var b10 = EnsureBooking("demo-seed-10", kh2, mazda3, -30, -27, BookingStatus.DaTraXe, "Sự cố va chạm.");
+    if (b10 != null)
+    {
+        AddReturn(b10, b10.EndDate, 7_000_000m, "Hư hại thân xe nặng sau va chạm, cần sơn và thay đèn.");
+        AddPayment(b10, b10.TotalPrice, PaymentMethod.TienMat, PaymentStatus.DaThanhToan, "DEMO-PAY-010", 30);
+    }
+
+    foreach (var key in new[] { "demo-seed-04", "demo-seed-05", "demo-seed-06", "demo-seed-08", "demo-seed-09", "demo-seed-10" })
+    {
+        var b = db.Bookings.FirstOrDefault(x => x.CorrelationId == key);
+        if (b == null) continue;
+        var odo = 20_000 + b.Id * 100;
+        EnsureHandover(b, HandoverType.Giao, odo, 100, "Xe sạch, không trầy xước (demo).");
+        EnsureDepositCollected(b);
+        if (b.Status == BookingStatus.DaTraXe)
+        {
+            var dmg = db.ReturnRecords.Where(r => r.BookingId == b.Id).Select(r => r.DamageNote).FirstOrDefault();
+            EnsureHandover(b, HandoverType.Nhan, odo + 420, 60, dmg ?? "Xe nguyên vẹn (demo).");
+            if (key is "demo-seed-05" or "demo-seed-09" or "demo-seed-10") EnsureDepositSettled(b);
+        }
+    }
+
+    // Yêu cầu gia hạn đang chờ duyệt cho đơn đã xác nhận của Bình (Fortuner), thêm 2 ngày.
+    var b2 = db.Bookings.FirstOrDefault(x => x.CorrelationId == "demo-seed-02");
+    if (b2 != null && !db.Set<BookingExtension>().Any(e => e.BookingId == b2.Id))
+    {
+        db.Set<BookingExtension>().Add(new BookingExtension
+        {
+            BookingId = b2.Id, OldEndDate = b2.EndDate, NewEndDate = b2.EndDate.AddDays(2),
+            ExtraAmount = CarRental.Application.Common.PricingCalculator.ExtensionCharge(b2.FinalPricePerDay, 2), RequestedById = b2.CustomerId
+        });
+        db.SaveChanges();
+    }
+    Console.WriteLine("Đã seed cọc xe, biên bản bàn giao, quyết toán cọc (phí 1,2 triệu và 7 triệu) và 1 yêu cầu gia hạn chờ duyệt.");
+}
+
+// ---------- Đợt 4: chi nhánh, mã giảm giá, phụ phí, giá theo giờ (idempotent) ----------
+void SeedWave4()
+{
+    foreach (var (name, addr) in new[] { ("Chi nhánh Quận 1", "12 Lê Lợi, Quận 1, TP.HCM"), ("Chi nhánh Sân bay Tân Sơn Nhất", "Đường Trường Sơn, Tân Bình, TP.HCM") })
+        if (!db.Set<Branch>().Any(b => b.Name == name))
+            db.Set<Branch>().Add(new Branch { Name = name, Address = addr, Phone = "02838000000" });
+    db.SaveChanges();
+
+    var branchIds = db.Set<Branch>().OrderBy(b => b.Id).Select(b => b.Id).Take(2).ToList();
+    foreach (var c in db.Cars.Where(x => x.BranchId == null || x.PricePerHour == null).ToList())
+    {
+        c.BranchId ??= branchIds[c.Id % branchIds.Count];
+        c.PricePerHour ??= Math.Round(c.BasePricePerDay / 8m / 1000m) * 1000m;
+    }
+    db.SaveChanges();
+
+    var now = DateTime.UtcNow;
+    void EnsureCoupon(string code, CouponType type, decimal value, decimal? max, decimal? min, DateTime from, DateTime to, int? limit)
+    {
+        if (db.Set<Coupon>().Any(c => c.Code == code)) return;
+        db.Set<Coupon>().Add(new Coupon { Code = code, Type = type, Value = value, MaxDiscount = max, MinOrderAmount = min, ValidFrom = from, ValidTo = to, UsageLimit = limit });
+        db.SaveChanges();
+    }
+    EnsureCoupon("WELCOME10", CouponType.PhanTram, 10, 300_000m, 500_000m, now.AddDays(-30), now.AddDays(180), 100);
+    EnsureCoupon("GIAM200K", CouponType.SoTien, 200_000m, null, 1_000_000m, now.AddDays(-30), now.AddDays(60), 50);
+    EnsureCoupon("HETHAN", CouponType.PhanTram, 20, null, null, now.AddDays(-90), now.AddDays(-1), 10);
+
+    if (!db.Set<Surcharge>().Any())
+    {
+        db.Set<Surcharge>().Add(new Surcharge { Name = "Phụ phí cuối tuần", Type = SurchargeType.CoDinh, Amount = 100_000m, AutoApply = false });
+        db.Set<Surcharge>().Add(new Surcharge { Name = "Phí dịch vụ", Type = SurchargeType.PhanTram, Amount = 2, AutoApply = true });
+        db.SaveChanges();
+    }
+    Console.WriteLine("Đã seed đợt 4: chi nhánh, mã WELCOME10/GIAM200K/HETHAN, phụ phí, giá theo giờ.");
+}
+
+// ---------- Đợt 5: lịch đăng kiểm/bảo hiểm/bảo dưỡng và 1 đơn quá hạn trả (idempotent) ----------
+void SeedWave5()
+{
+    var now = DateTime.UtcNow;
+    var cars = db.Cars.Where(c => c.Status != CarStatus.ChoDuyet).OrderBy(c => c.Id).ToList();
+    var m = db.Set<CarMaintenance>();
+    if (!m.Any() && cars.Count >= 3)
+    {
+        foreach (var c in cars)
+        {
+            m.Add(new CarMaintenance { CarId = c.Id, Type = MaintenanceType.DangKiem, DueDate = today.AddDays(120 + c.Id % 60), Note = "Đăng kiểm định kỳ" });
+            m.Add(new CarMaintenance { CarId = c.Id, Type = MaintenanceType.BaoHiem, DueDate = today.AddDays(200 + c.Id % 90), Note = "Bảo hiểm thân vỏ" });
+        }
+        m.Add(new CarMaintenance { CarId = cars[0].Id, Type = MaintenanceType.DangKiem, DueDate = today.AddDays(-5), Note = "QUÁ HẠN đăng kiểm (demo)" });
+        m.Add(new CarMaintenance { CarId = cars[1].Id, Type = MaintenanceType.BaoHiem, DueDate = today.AddDays(5), Note = "Sắp hết hạn bảo hiểm (demo)" });
+        m.Add(new CarMaintenance { CarId = cars[2].Id, Type = MaintenanceType.BaoDuong, DueDate = today.AddDays(10), DueOdometer = 20_000, Note = "Bảo dưỡng 20.000 km" });
+        foreach (var c in cars.Where(x => x.Status == CarStatus.BaoTri))
+            m.Add(new CarMaintenance { CarId = c.Id, Type = MaintenanceType.BaoDuong, DueDate = today.AddDays(-1), StartedAt = now.AddDays(-1), Status = MaintenanceStatus.DangThucHien, Note = "Đang bảo dưỡng (demo)" });
+        db.SaveChanges();
+    }
+
+    // Đơn đang thuê đã quá hạn trả: chọn một xe sẵn sàng không có đơn nào trong khoảng đó.
+    const string key = "demo-w5-overdue";
+    if (!db.Bookings.Any(b => b.CorrelationId == key))
+    {
+        var start = today.AddDays(-6); var end = today.AddDays(-1);
+        var car = cars.FirstOrDefault(c => c.Status == CarStatus.SanSang
+            && !db.Bookings.Any(b => b.CarId == c.Id && b.StartDate < today && b.EndDate > start));
+        if (car is not null)
+        {
+            EnsureBooking(key, kh1, car, -6, -1, BookingStatus.DangThue, "Khách chưa trả xe (demo dashboard).");
+            car.Status = CarStatus.DangThue;
+            db.SaveChanges();
+        }
+    }
+    Console.WriteLine("Đã seed đợt 5: lịch đăng kiểm/bảo hiểm (1 quá hạn, 1 sắp hạn), bảo dưỡng và 1 đơn quá hạn trả.");
+}
